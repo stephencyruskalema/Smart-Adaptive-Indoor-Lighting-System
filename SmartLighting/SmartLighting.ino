@@ -36,10 +36,10 @@ const uint16_t PWM_MAX         = (1 << PWM_BITS) - 1;
 // Occupancy
 const uint32_t HOLD_TIME_MS        = 15000; // keep "occupied" this long after last detection
 const uint32_t RADAR_TIMEOUT_MS    = 2000;  // no UART frame for this long -> use OUT pin
-const uint16_t MAX_DETECT_CM       = 40;    // ignore targets farther than this
+const uint16_t MAX_DETECT_CM       = 15;    // ignore targets farther than this
 const bool     CONFIGURE_RADAR     = false; 
-const uint8_t  RADAR_MOVE_SENS     = 40;    
-const uint8_t  RADAR_STATIC_SENS   = 40;    
+const uint8_t  RADAR_MOVE_SENS     = 15;    
+const uint8_t  RADAR_STATIC_SENS   = 15;    
 const float    SETBACK_DUTY_PCT    = 0.0f;  // light level when zone is empty (0 = off)
 
 // Illuminance feedback
