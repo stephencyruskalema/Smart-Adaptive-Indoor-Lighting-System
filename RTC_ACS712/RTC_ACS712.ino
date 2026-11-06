@@ -7,6 +7,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <RTClib.h>           // Requires "RTClib" library by Adafruit
+#include <time.h>
 
 // ----------------------------------------------------------------------------
 //  1. PIN MAP
@@ -38,10 +39,10 @@ const uint16_t PWM_MAX         = (1 << PWM_BITS) - 1;
 // Occupancy
 const uint32_t HOLD_TIME_MS        = 15000; // keep "occupied" this long after last detection
 const uint32_t RADAR_TIMEOUT_MS    = 2000;  // no UART frame for this long -> use OUT pin
-const uint16_t MAX_DETECT_CM       = 15;    // ignore targets farther than this
+const uint16_t MAX_DETECT_CM       = 5;    // ignore targets farther than this
 const bool     CONFIGURE_RADAR     = false; 
-const uint8_t  RADAR_MOVE_SENS     = 15;    
-const uint8_t  RADAR_STATIC_SENS   = 15;    
+const uint8_t  RADAR_MOVE_SENS     = 5;    
+const uint8_t  RADAR_STATIC_SENS   = 5;    
 const float    SETBACK_DUTY_PCT    = 0.0f;  // light level when zone is empty (0 = off)
 
 // Illuminance feedback
@@ -158,16 +159,15 @@ void pwmWritePercent(uint8_t z, float pct) {
 }
 
 void currentSensorUpdate() {
-  // Read analog value from SP (GPIO 36) with 12-bit resolution (0-4095) & 11db attenuation (~3.3V max)
   int rawAdc = analogRead(PIN_ACS712);
   float voltage = (rawAdc / 4095.0f) * 3.3f;
-  
-  // ACS712-5A sensitivity is typically 185 mV/A (0.185V/A) with a 2.5V center offset (or adjusted for reverse wiring)
   const float sensitivity = 0.185f; 
   const float zeroVoltage = 2.50f;  
   
-  // For reverse wiring setup, calculate current magnitude absolute difference from zero point
-  systemCurrentAmps = fabsf(voltage - zeroVoltage) / sensitivity;
+  systemCurrentAmps = (voltage - zeroVoltage) / sensitivity;
+  if (systemCurrentAmps < 0.05f) {
+    systemCurrentAmps = 0.0f;
+  }
 }
 
 void ldrUpdate() {                              
@@ -250,8 +250,6 @@ void controlZone(uint8_t z) {
 // ----------------------------------------------------------------------------
 void lcdUpdate() {
   char line[17];
-  
-  // Row 0 & 1: Zone status
   for (uint8_t z = 0; z < NUM_ZONES; z++) {
     int lightPct = (int)(zones[z].ldrFiltered * 100.0f / 4095.0f + 0.5f);
     int dutyPct  = (int)(zones[z].dutyPct + 0.5f);
@@ -416,6 +414,15 @@ void networkSetup() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   lastWifiAttempt = millis();
 
+  // Wait up to 10 seconds for Wi-Fi connection so we can fetch real-time via NTP
+  uint32_t wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 10000) {
+    delay(500);
+  }
+
+  // Configure NTP time servers (East Africa Time: UTC+3 = 10800 seconds offset)
+  configTime(10800, 0, "pool.ntp.org", "time.google.com");
+
   const char* headerKeys[] = {"Authorization"};
   httpServer.collectHeaders(headerKeys, 1);
 
@@ -461,11 +468,17 @@ void setup() {
     Serial.println("# WARNING: Couldn't find DS3231 RTC module!");
   }
   
-  // --------------------------------------------------------------------------
-  // Initialize the RTC clock only after a power loss; otherwise preserve its time.
-  // --------------------------------------------------------------------------
-  if (rtcAvailable && rtc.lostPower()) {
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  // Setup network and wait briefly for NTP sync
+  networkSetup();
+
+  // Automatically sync DS3231 RTC from internet NTP time if connected
+  if (rtcAvailable && WiFi.status() == WL_CONNECTED) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 5000)) { // wait up to 5 seconds for internet time
+      rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                          timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
+      Serial.println("# RTC successfully synced from Internet NTP time!");
+    }
   }
 
   lcd.init();
@@ -474,8 +487,6 @@ void setup() {
   lcd.setCursor(0, 1); lcd.print("Group C - ESP32");
   delay(1500);                                  
   lcd.clear();
-  
-  networkSetup();
 
   Serial.println("# timestamp,mode,zone,occupied,radarUART,ldrAdc,targetAdc,duty%,currentA");
 }
