@@ -37,12 +37,12 @@ const uint8_t  PWM_BITS        = 10;        // 0..1023
 const uint16_t PWM_MAX         = (1 << PWM_BITS) - 1;
 
 // Occupancy
-const uint32_t HOLD_TIME_MS        = 15000; // keep "occupied" this long after last detection
+const uint32_t HOLD_TIME_MS        = 5000; // keep "occupied" this long after last detection
 const uint32_t RADAR_TIMEOUT_MS    = 2000;  // no UART frame for this long -> use OUT pin
-const uint16_t MAX_DETECT_CM       = 5;    // ignore targets farther than this
+const uint16_t MAX_DETECT_CM       = 0.25;    // ignore targets farther than this
 const bool     CONFIGURE_RADAR     = false; 
-const uint8_t  RADAR_MOVE_SENS     = 5;    
-const uint8_t  RADAR_STATIC_SENS   = 5;    
+const uint8_t  RADAR_MOVE_SENS     = 0.25;    
+const uint8_t  RADAR_STATIC_SENS   = 0.25;    
 const float    SETBACK_DUTY_PCT    = 0.0f;  // light level when zone is empty (0 = off)
 
 // Illuminance feedback
@@ -160,13 +160,29 @@ void pwmWritePercent(uint8_t z, float pct) {
 
 void currentSensorUpdate() {
   int rawAdc = analogRead(PIN_ACS712);
-  float voltage = (rawAdc / 4095.0f) * 3.3f;
-  const float sensitivity = 0.185f; 
-  const float zeroVoltage = 2.50f;  
   
-  systemCurrentAmps = (voltage - zeroVoltage) / sensitivity;
-  if (systemCurrentAmps < 0.05f) {
+  // Smoothing filter to keep idle noise flat
+  static float smoothedAdc = rawAdc;
+  smoothedAdc = (0.15f * rawAdc) + (0.85f * smoothedAdc);
+  
+  float voltage = (smoothedAdc / 4095.0f) * 3.3f;
+  
+  const float sensitivity = 0.066f; // 66 mV/A for 30A module[span_0](start_span)[span_0](end_span)[span_1](start_span)[span_1](end_span)
+  const float zeroVoltage = 2.415f; // Baseline offset[span_2](start_span)[span_2](end_span)
+  
+  // Invert sign so voltage drop under load registers as positive current
+  systemCurrentAmps = -1.0f * (voltage - zeroVoltage) / sensitivity;
+
+  // Narrow deadband to block absolute idle noise
+  if (systemCurrentAmps > -0.08f && systemCurrentAmps < 0.08f) {
     systemCurrentAmps = 0.0f;
+  }
+
+  // Print debug data once every 3 seconds (3000ms)
+  static unsigned long lastPrintTime = 0;
+  if (millis() - lastPrintTime >= 3000) {
+    lastPrintTime = millis();
+    Serial.printf("ACS712 Debug -> Raw ADC: %.1f | Voltage: %.3fV | Current: %.3fA\n", smoothedAdc, voltage, systemCurrentAmps);
   }
 }
 
@@ -407,20 +423,18 @@ void networkSetup() {
   bootId = bootIdBuffer;
   publishSnapshot();
   
-  if(strlen(API_TOKEN) < 24 || String(API_TOKEN).startsWith("REPLACE_")) { Serial.println("# Network disabled: configure unique API token"); return; }
+  if(strlen(API_TOKEN) < 5 || String(API_TOKEN).startsWith("REPLACE_")) { Serial.println("# Network disabled: configure unique API token"); return; }
   
   WiFi.mode(WIFI_STA); 
   WiFi.setAutoReconnect(true); 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   lastWifiAttempt = millis();
 
-  // Wait up to 10 seconds for Wi-Fi connection so we can fetch real-time via NTP
   uint32_t wifiStart = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 10000) {
     delay(500);
   }
 
-  // Configure NTP time servers (East Africa Time: UTC+3 = 10800 seconds offset)
   configTime(10800, 0, "pool.ntp.org", "time.google.com");
 
   const char* headerKeys[] = {"Authorization"};
@@ -453,28 +467,24 @@ void setup() {
 
   analogReadResolution(12);
   
-  // Setup LDR and ACS712 pin attenuations
   for (uint8_t z = 0; z < NUM_ZONES; z++) {
     analogSetPinAttenuation(PIN_LDR[z], ADC_11db);   
     pinMode(PIN_RADAR_OUT[z], INPUT);
     radarSerial[z]->begin(RADAR_BAUD, SERIAL_8N1, RADAR_RX[z], RADAR_TX[z]);
   }
-  analogSetPinAttenuation(PIN_ACS712, ADC_11db); // Configure SP / GPIO 36 for ADC reading
+  analogSetPinAttenuation(PIN_ACS712, ADC_11db); 
 
-  // I2C & RTC Init
   Wire.begin(PIN_SDA, PIN_SCL);
   bool rtcAvailable = rtc.begin();
   if (!rtcAvailable) {
     Serial.println("# WARNING: Couldn't find DS3231 RTC module!");
   }
   
-  // Setup network and wait briefly for NTP sync
   networkSetup();
 
-  // Automatically sync DS3231 RTC from internet NTP time if connected
   if (rtcAvailable && WiFi.status() == WL_CONNECTED) {
     struct tm timeinfo;
-    if (getLocalTime(&timeinfo, 5000)) { // wait up to 5 seconds for internet time
+    if (getLocalTime(&timeinfo, 5000)) { 
       rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
                           timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
       Serial.println("# RTC successfully synced from Internet NTP time!");
@@ -494,7 +504,7 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  httpServer.handleClient(); // Process incoming web requests
+  httpServer.handleClient(); 
   applyNetworkCommands();
   networkMaintain();
   radarDrain();                                 
@@ -503,7 +513,7 @@ void loop() {
   if (now - tLdr >= LDR_SAMPLE_MS) {
     tLdr = now;
     ldrUpdate();
-    currentSensorUpdate(); // Sample current sensor alongside LDRs
+    currentSensorUpdate(); 
   }
 
   if (now - tControl >= CONTROL_MS) {
